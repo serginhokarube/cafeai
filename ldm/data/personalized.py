@@ -7,70 +7,6 @@ from torchvision import transforms
 
 import random
 
-imagenet_templates_smallest = [
-    'a photo of a {}',
-]
-
-imagenet_templates_small = [
-    'a photo of a {}',
-    'a rendering of a {}',
-    'a cropped photo of the {}',
-    'the photo of a {}',
-    'a photo of a clean {}',
-    'a photo of a dirty {}',
-    'a dark photo of the {}',
-    'a photo of my {}',
-    'a photo of the cool {}',
-    'a close-up photo of a {}',
-    'a bright photo of the {}',
-    'a cropped photo of a {}',
-    'a photo of the {}',
-    'a good photo of the {}',
-    'a photo of one {}',
-    'a close-up photo of the {}',
-    'a rendition of the {}',
-    'a photo of the clean {}',
-    'a rendition of a {}',
-    'a photo of a nice {}',
-    'a good photo of a {}',
-    'a photo of the nice {}',
-    'a photo of the small {}',
-    'a photo of the weird {}',
-    'a photo of the large {}',
-    'a photo of a cool {}',
-    'a photo of a small {}',
-]
-
-imagenet_dual_templates_small = [
-    'a photo of a {} with {}',
-    'a rendering of a {} with {}',
-    'a cropped photo of the {} with {}',
-    'the photo of a {} with {}',
-    'a photo of a clean {} with {}',
-    'a photo of a dirty {} with {}',
-    'a dark photo of the {} with {}',
-    'a photo of my {} with {}',
-    'a photo of the cool {} with {}',
-    'a close-up photo of a {} with {}',
-    'a bright photo of the {} with {}',
-    'a cropped photo of a {} with {}',
-    'a photo of the {} with {}',
-    'a good photo of the {} with {}',
-    'a photo of one {} with {}',
-    'a close-up photo of the {} with {}',
-    'a rendition of the {} with {}',
-    'a photo of the clean {} with {}',
-    'a rendition of a {} with {}',
-    'a photo of a nice {} with {}',
-    'a good photo of a {} with {}',
-    'a photo of the nice {} with {}',
-    'a photo of the small {} with {}',
-    'a photo of the weird {} with {}',
-    'a photo of the large {} with {}',
-    'a photo of a cool {} with {}',
-    'a photo of a small {} with {}',
-]
-
 per_img_token_list = [
     'א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ז', 'ח', 'ט', 'י', 'כ', 'ל', 'מ', 'נ', 'ס', 'ע', 'פ', 'צ', 'ק', 'ר', 'ש', 'ת',
 ]
@@ -88,6 +24,7 @@ class PersonalizedBase(Dataset):
                  center_crop=False,
                  mixing_prob=0.25,
                  coarse_class_text=None,
+                 templates=[],
                  ):
 
         self.data_root = data_root
@@ -105,6 +42,7 @@ class PersonalizedBase(Dataset):
         self.mixing_prob = mixing_prob
 
         self.coarse_class_text = coarse_class_text
+        self.templates = templates
 
         if per_image_tokens:
             assert self.num_images < len(per_img_token_list), f"Can't use per-image tokens when the training set contains more than {len(per_img_token_list)} tokens. To enable larger sets, add more tokens to 'per_img_token_list'."
@@ -136,21 +74,14 @@ class PersonalizedBase(Dataset):
         new_image.paste(image, (0, 0), image)
         image = new_image.convert('RGB')
 
-        templates = [
-            'a {} portrait of {}',
-            'an {} image of {}',
-            'a {} pretty picture of {}',
-            'a {} clip art picture of {}',
-            'an {} illustration of {}',
-            'a {} 3D render of {}',
-            'a {} {}',
-        ]
+        #filename = os.path.basename(self.image_paths[i % self.num_images])
+        #filename_tokens = os.path.splitext(filename)[0].replace(' ', '-').replace('_', '-').split('-')
+        #filename_tokens = [token for token in filename_tokens if token.isalpha()]
 
-        filename = os.path.basename(self.image_paths[i % self.num_images])
-        filename_tokens = os.path.splitext(filename)[0].replace(' ', '-').replace('_', '-').split('-')
-        filename_tokens = [token for token in filename_tokens if token.isalpha()]
-
-        text = random.choice(templates).format(' '.join(filename_tokens), self.placeholder_token)
+        if self.per_image_tokens and np.random.uniform() < self.mixing_prob:
+            text = random.choice(self.templates).format(placeholder_string, per_img_token_list[i % self.num_images])
+        else:
+            text = random.choice(self.templates).format(placeholder_string)
 
         example["caption"] = text
 
