@@ -1,3 +1,4 @@
+from turtle import pen
 import torch
 import torch.nn as nn
 from functools import partial
@@ -5,6 +6,7 @@ import clip
 from einops import rearrange, repeat
 from transformers import CLIPTokenizer, CLIPTextModel
 import kornia
+import numpy as np
 
 from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
 from ldm.util import default
@@ -157,12 +159,15 @@ class SpatialRescaler(nn.Module):
 
 class FrozenCLIPEmbedder(AbstractEncoder):
     """Uses the CLIP transformer encoder for text (from Hugging Face)"""
-    def __init__(self, version="openai/clip-vit-large-patch14", device="cuda", max_length=77):
+    def __init__(self, version="openai/clip-vit-large-patch14", device="cuda", max_length=77, penultimate=True, max_chunks=3, extended_mode=True):
         super().__init__()
         self.tokenizer = CLIPTokenizer.from_pretrained(version)
         self.transformer = CLIPTextModel.from_pretrained(version)
         self.device = device
         self.max_length = max_length
+        self.penultimate = penultimate  # return embeddings from 2nd to last layer, see https://arxiv.org/pdf/2205.11487.pdf
+        self.extended_mode = extended_mode
+        self.max_chunks = max_chunks
         #self.freeze()
 
         def embedding_forward(
@@ -200,6 +205,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             output_attentions = None,
             output_hidden_states = None,
             return_dict = None,
+            penultimate = None,
         ):
             output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
             output_hidden_states = (
@@ -207,12 +213,12 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             )
             return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-            encoder_states = () if output_hidden_states else None
+            encoder_states = () if output_hidden_states or penultimate else None
             all_attentions = () if output_attentions else None
 
             hidden_states = inputs_embeds
             for idx, encoder_layer in enumerate(self.layers):
-                if output_hidden_states:
+                if output_hidden_states or penultimate:
                     encoder_states = encoder_states + (hidden_states,)
 
                 layer_outputs = encoder_layer(
@@ -227,10 +233,13 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                 if output_attentions:
                     all_attentions = all_attentions + (layer_outputs[1],)
 
-            if output_hidden_states:
+            if output_hidden_states or penultimate:
                 encoder_states = encoder_states + (hidden_states,)
 
-            return hidden_states
+            if penultimate: #grab the second to last hidden state if penultimate
+                return encoder_states[-2]
+            else:
+                return hidden_states
 
         self.transformer.text_model.encoder.forward = encoder_forward.__get__(self.transformer.text_model.encoder)
 
@@ -244,6 +253,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             output_hidden_states = None,
             return_dict = None,
             embedding_manager = None,
+            penultimate = None,
         ):
             output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
             output_hidden_states = (
@@ -278,6 +288,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
+                penultimate=penultimate,
             )
 
             last_hidden_state = self.final_layer_norm(last_hidden_state)
@@ -295,6 +306,7 @@ class FrozenCLIPEmbedder(AbstractEncoder):
             output_hidden_states = None,
             return_dict = None,
             embedding_manager = None,
+            penultimate=None,
         ):
             return self.text_model(
                 input_ids=input_ids,
@@ -303,7 +315,8 @@ class FrozenCLIPEmbedder(AbstractEncoder):
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
-                embedding_manager = embedding_manager
+                embedding_manager = embedding_manager,
+                penultimate=penultimate,
             )
 
         self.transformer.forward = transformer_forward.__get__(self.transformer)
@@ -314,13 +327,54 @@ class FrozenCLIPEmbedder(AbstractEncoder):
         for param in self.parameters():
             param.requires_grad = False
 
-    def forward(self, text, **kwargs):
-        batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length, return_length=True,
-                                        return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
-        tokens = batch_encoding["input_ids"].to(self.device)        
-        z = self.transformer(input_ids=tokens, **kwargs)
+    def transform(self, tokens, **kwargs):
+        outputs = self.transformer(input_ids=tokens, penultimate=True, **kwargs)
+        return outputs
 
-        return z
+    def forward(self, text, **kwargs):
+        if self.extended_mode:
+            max_standard_tokens = self.max_length - 2
+
+            batch_encoding = self.tokenizer(text, truncation=True,
+                                            max_length=(self.max_length * self.max_chunks) - (self.max_chunks * 2),
+                                            return_length=True, return_overflowing_tokens=False, padding=False, 
+                                            add_special_tokens=False)
+
+            # get the max length aligned to chunk size.
+            max_len = np.ceil(max([len(x) for x in batch_encoding["input_ids"]]) / max_standard_tokens).astype(int).item() * max_standard_tokens
+            if max_len > max_standard_tokens:
+                z = None
+
+                for index, x in enumerate(batch_encoding["input_ids"]):
+                    if len(x) < max_len:
+                        # pad all tokens to the longest sentence/sequence, maybe find a torch method that can do this?
+                        batch_encoding["input_ids"][index] = [*x, *np.full((max_len - len(x)), self.tokenizer.eos_token_id)]
+
+                batch_t = torch.tensor(batch_encoding["input_ids"])
+                # process the tensors in vertically sliced chunks
+                chunks = [batch_t[:, i:i + max_standard_tokens] for i in range(0, max_len, max_standard_tokens)]
+                for chunk in chunks:
+                    chunk = torch.cat((torch.full((chunk.shape[0], 1), self.tokenizer.bos_token_id), chunk, torch.full((chunk.shape[0], 1), self.tokenizer.eos_token_id)), 1)
+
+                    if z is None:
+                        z = self.transform(chunk.to(self.device))
+                    else:
+                        z = torch.cat((z, self.transform(chunk.to(self.device))), dim=-2)
+
+                return z
+            else:
+                chunk = batch_encoding['input_ids']
+                for i, x in enumerate(chunk):
+                    chunk[i] = [self.tokenizer.bos_token_id, *x, *np.full((self.max_length - len(x) - 1), self.tokenizer.eos_token_id)]
+                return self.transform(torch.asarray(chunk).to(self.device), **kwargs)
+
+        else:
+            # default behavior
+            batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length,
+                                            return_length=True, return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
+            tokens = batch_encoding["input_ids"].to(self.device)
+
+            return self.transform(tokens, **kwargs)
 
     def encode(self, text, **kwargs):
         return self(text, **kwargs)

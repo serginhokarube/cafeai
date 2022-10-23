@@ -1,3 +1,5 @@
 logs
 *.pyc
-
+__pycache__
+latent_diffusion.egg-info
+src/

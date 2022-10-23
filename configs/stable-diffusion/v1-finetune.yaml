@@ -26,7 +26,7 @@ model:
         placeholder_strings: ["*"] #  * & ^ % @
         initializer_words: ["ophanim"]
         per_image_tokens: false
-        num_vectors_per_token: 1
+        num_vectors_per_token: 9
         progressive_words: False
 
     unet_config:
@@ -71,11 +71,15 @@ model:
 
     cond_stage_config:
       target: ldm.modules.encoders.modules.FrozenCLIPEmbedder
+      params:
+        penultimate: True
+        extended_mode: True
+        max_chunks: 3
 
 data:
   target: main.DataModuleFromConfig
   params:
-    batch_size: 1
+    batch_size: 4
     num_workers: 16
     wrap: false
     train:
@@ -101,11 +105,11 @@ lightning:
     image_logger:
       target: main.ImageLogger
       params:
-        batch_frequency: 500
+        batch_frequency: 100
         max_images: 8
         increase_log_steps: False
 
   trainer:
     benchmark: True
-    max_steps: 100000
+    max_steps: 200000
     find_unused_parameters: False
